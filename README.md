@@ -4,6 +4,17 @@ A tiny Windows tray tool that types a predefined key sequence with a single hotk
 
 Because the keystrokes come from a real keyboard HID device, the sequence works anywhere normal input is accepted: games, anti-cheat-protected applications, remote-desktop sessions, and full-screen apps where `SendInput`-style injection is ignored.
 
+### Why this is better than simulated keystrokes
+
+ViperKey doesn't inject at the Win32/Windows input layer (no `SendInput`, no fabricated `WM_KEYDOWN` events). Instead it drives a **genuine USB keyboard device** — VIIPER creates it over USB/IP and the usbip-win2 driver presents it to Windows as real hardware, built on top of the ubiquitous USB/IP stack:
+
+- **Indistinguishable at the layer that matters.** To the OS *and* to applications, the input arrives as ordinary USB HID report traffic — the same path a physical keyboard uses. Games and anti-cheat that inspect for injected input (message hooks, `SendInput` markers, synthetic-event flags) generally see nothing abnormal, because there is nothing abnormal — the bytes genuinely come off a USB bus.
+- **Works where injection is blocked.** Full-screen/ExclusiveFullscreen games, elevated windows, anti-cheat that disables Win32 injection — a plug-in keyboard keeps working.
+- **System-level keyboard semantics.** Real key-up/key-down pairing, N-key rollover, and driver-level behavior, not the constrained, easily-detected emulation of `keybd_event`/`SendInput`.
+- **No kernel drivers in ViperKey.** All device logic lives in the userspace VIIPER process; the kernel side is the generic, signed usbip-win2 driver. Nothing to compile per-game, nothing to sign yourself. (Anti-cheat detection is never 100% guaranteed for any input method — but at the USB layer there is no synthetic-input signal to detect.)
+
+As VIIPER describes it: input devices that are *"indistinguishable from real hardware to the operating system and applications."* The practical upshot: no detectable difference from typing on the keyboard in front of you.
+
 ```
 viperkey.exe        ->  viiper.exe         ->  usbip-win2 driver ->  OS sees a real keyboard
 polls hotkeys,          creates a virtual      creates the actual
