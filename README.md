@@ -1,5 +1,7 @@
 # ViperKey
 
+<img src="ViperKeyLogo.png" alt="ViperKey" width="300">
+
 A tiny Windows tray tool that types a predefined key sequence with a single hotkey — through a **virtual USB keyboard**, not simulated keys.
 
 Because the keystrokes come from a real keyboard HID device, the sequence works anywhere normal input is accepted: games, anti-cheat-protected applications, remote-desktop sessions, and full-screen apps where `SendInput`-style injection is ignored.
@@ -163,6 +165,7 @@ The tool then runs inside the PowerShell session, so:
 | Path | Purpose |
 |---|---|
 | `viperkey.cs` | Entire application (single file) |
+| `ViperKeyLogo.png` | Project logo (shown in the README header) |
 | `LICENSE` | GNU GPL v3 (ViperKey's own license) |
 | `NOTICE` | Third-party attribution (VIIPER GPL-3.0, usbip-win2 BSD-2-Clause) |
 | `icons/icon.ico`, `icons/alert.ico` | Tray icons; also embedded in the binary |
