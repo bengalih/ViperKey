@@ -15,7 +15,18 @@ using Microsoft.Win32;
 
 static class ViperKey
 {
-    const string REV = "rev-20260909-15";   // printed at startup; bump on every code change
+    const string REV = "rev-20260909-16";   // printed at startup; bump on every code change
+
+    // Where viperkey.json, viperkey.log and the .ico files are looked up.
+    // Defaults to the exe folder; VIPERKEY_DIR overrides it (handy when the
+    // app is loaded straight from PowerShell, whose AppDomain base is not the
+    // working directory).
+    static string RuntimeDir()
+    {
+        string env = Environment.GetEnvironmentVariable("VIPERKEY_DIR");
+        if (!string.IsNullOrWhiteSpace(env)) return env.Trim();
+        return AppDomain.CurrentDomain.BaseDirectory;
+    }
 
     // ---------- user32 ----------
     [DllImport("user32.dll")]
@@ -1057,7 +1068,7 @@ static NotifyIcon notifyIcon;
         }
         try
         {
-            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "viperkey.log");
+            string logPath = Path.Combine(RuntimeDir(), "viperkey.log");
             StreamWriter sw = new StreamWriter(logPath, true, Encoding.UTF8);
             sw.AutoFlush = true;
             logWriter = sw;
@@ -1221,7 +1232,7 @@ static NotifyIcon notifyIcon;
     [STAThread]
     static int Main()
     {
-        cfgPathField = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "viperkey.json");
+        cfgPathField = Path.Combine(RuntimeDir(), "viperkey.json");
         if (!File.Exists(cfgPathField))
         {
             WriteDefaultJson(cfgPathField);
@@ -1380,7 +1391,7 @@ static NotifyIcon notifyIcon;
         notifyIcon = new NotifyIcon();
         try
         {
-            string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");
+            string iconPath = Path.Combine(RuntimeDir(), "icon.ico");
             notifyIcon.Icon = LoadIcon(iconPath, EMBEDDED_ICON);
             if (notifyIcon.Icon == null) notifyIcon.Icon = SystemIcons.Application;
         }
@@ -1392,7 +1403,7 @@ notifyIcon.Text = "Macro Tool";
         normalTrayIcon = notifyIcon.Icon;
         try
         {
-            string alertPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "alert.ico");
+            string alertPath = Path.Combine(RuntimeDir(), "alert.ico");
             alertTrayIcon = LoadIcon(alertPath, EMBEDDED_ALERT);
         }
         catch { }

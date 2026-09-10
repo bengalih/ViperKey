@@ -127,10 +127,11 @@ Then run it:
 
 ### Load and run the source directly (no exe produced)
 
-The in-memory compile produces no executable entry point, so the private static `Main` is invoked via reflection:
+The in-memory compile produces no executable entry point, and its `AppDomain` base directory is PowerShell's install folder — not your working directory. So the private static `Main` is invoked via reflection, and `VIPERKEY_DIR` redirects `viperkey.json`/`viperkey.log`/icons to the current folder:
 
 ```powershell
 cd D:\path\to\this\repo
+$env:VIPERKEY_DIR = (Get-Location).Path
 $t = Add-Type -Path .\viperkey.cs -PassThru `
   -ReferencedAssemblies System.Web.Extensions,System.Windows.Forms,System.Drawing,System.Management |
   Where-Object FullName -eq 'ViperKey'
