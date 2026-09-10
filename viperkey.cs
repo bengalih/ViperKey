@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -15,7 +16,7 @@ using Microsoft.Win32;
 
 static class ViperKey
 {
-    const string REV = "rev-20260909-17";   // printed at startup; bump on every code change
+    const string REV = "rev-20260909-31";   // printed at startup; bump on every code change
 
     // Where viperkey.json, viperkey.log and the .ico files are looked up.
     // Defaults to the exe folder; VIPERKEY_DIR overrides it (handy when the
@@ -534,6 +535,10 @@ static class ViperKey
         public string AbortKeyName = "F12";
         public int DefaultDelayMs = 3000;
         public bool Debug;
+        public byte IdlerKeyHid;
+        public string IdlerKeyName = "Space";
+        public int IdlerDelayMs = 60000;
+        public bool NotificationsEnabled = false;
         public List<KeyToken> Sequence = new List<KeyToken>();
     }
 
@@ -552,13 +557,33 @@ static class ViperKey
 
     static Config cfg;
     static string cfgPathField;
+    static string ActiveProfileName;
     static string LastConfigLoadError;
+
+    // ---------- profiles / global settings ----------
+    const string SETTINGS_FILE = "viperkey-settings.json";
+    static string SettingsPath;
+    static Config SettingsCfg;
+    static List<Profile> profileList;
+    static ToolStripMenuItem miProfiles;
+    static long settingsChangeTicks;
+    static long settingsReloadedTicks;
+    static long menuChangeTicks;
+    static long menuReloadedTicks;
+
+    // ---------- config model ----------
+    sealed class Profile
+    {
+        public string FilePath;
+        public string Name;      // shown in the tray; read from the profile's "name" field
+        public int Index;        // the "x" in viperkey.x.y.json; used for ordering only
+    }
+
     static long cfgChangeTicks;
     static long cfgReloadedTicks;
     const long ReloadDebounceTicks = 300 * TimeSpan.TicksPerMillisecond;
 
     static ViiperEngine viiper;
-    static volatile bool reloadNow;
     static volatile bool exitRequested;
     static TextWriter logWriter;
 static NotifyIcon notifyIcon;
@@ -570,8 +595,14 @@ static NotifyIcon notifyIcon;
     static ToolStripMenuItem miConfigError;
     static ToolStripMenuItem miTrigger;
     static ToolStripMenuItem miAbort;
+    static ToolStripMenuItem miIdler;
+    static ToolStripMenuItem miNotifications;
+    static System.Threading.Timer idlerTimer;
+    static volatile bool idlerEnabled;
+    static volatile bool notificationsEnabled;
     static string pendingConfigError;
     static readonly string RUN_KEY = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    static readonly Regex ProfileNameRx = new Regex(@"^viperkey\.(\d+)(?:\..*)?\.json$", RegexOptions.IgnoreCase);
 
     // ---------- key / modifier lookup ----------
     static byte ModBitsForName(string m)
@@ -881,39 +912,114 @@ static NotifyIcon notifyIcon;
         return -1;
     }
 
-    static Config LoadJsonConfig(string path)
+    // Profiles: viperkey.json plus viperkey.N.json / viperkey.N.label.json files in the
+    // exe folder, sorted by N. Global trigger/abort/delay/debug/idler live in
+    // viperkey-settings.json; a profile may override everything except "debug".
+    // The profile's display name comes from its "name" field.
+    static string ReadProfileName(string path)
     {
-        string text = "";
-        string js = "";
         try
         {
-            LastConfigLoadError = null;
-            text = File.ReadAllText(path);
-            LastJsonText = text;
-            js = StripJsonComments(text);
+            string text = File.ReadAllText(path);
             JavaScriptSerializer ser = new JavaScriptSerializer();
-            Dictionary<string, object> root = (Dictionary<string, object>)ser.DeserializeObject(js);
-
-            Config nc = new Config();
-
+            Dictionary<string, object> root = ser.DeserializeObject(StripJsonComments(text)) as Dictionary<string, object>;
             object o;
-            string mods = "Ctrl";
-            if (root.TryGetValue("trigger_mods", out o))
+            if (root != null && root.TryGetValue("name", out o) && o is string)
+                return (string)o;
+        }
+        catch { }
+        return null;
+    }
+
+    static List<Profile> ScanProfiles()
+    {
+        List<Profile> list = new List<Profile>();
+        try
+        {
+            string dir = RuntimeDir();
+            string basePath = Path.Combine(dir, "viperkey.json");
+            if (File.Exists(basePath))
             {
-                if (o is string) mods = (string)o;
-                else if (o is IList<object>)
-                {
-                    List<string> mm = new List<string>();
-                    foreach (object x in (IList<object>)o) mm.Add((string)x);
-                    mods = String.Join("+", mm.ToArray());
-                }
+                string baseName = ReadProfileName(basePath);
+                if (String.IsNullOrWhiteSpace(baseName)) baseName = "Default";
+                list.Add(new Profile { FilePath = basePath, Name = baseName, Index = -1 });
             }
+            foreach (string f in Directory.GetFiles(dir, "viperkey.*.json"))
+            {
+                Match m = ProfileNameRx.Match(Path.GetFileName(f));
+                if (!m.Success) continue;
+                string name = ReadProfileName(f);
+                if (String.IsNullOrWhiteSpace(name)) name = "Profile " + m.Groups[1].Value;
+                list.Add(new Profile
+                {
+                    FilePath = f,
+                    Index = int.Parse(m.Groups[1].Value),
+                    Name = name
+                });
+            }
+            list.Sort((a, b) => a.Index.CompareTo(b.Index));
+        }
+        catch { }
+        return list;
+    }
+
+    static Config DefaultSettings()
+    {
+        Config nc = new Config();
+        nc.TriggerModVks = TriggerVksFromSpec("Ctrl");
+        byte h; byte im;
+        LookupKey("K", out h, out im);
+        nc.TriggerKeyVk = HidToVk(h, "K");
+        nc.TriggerKeyName = "K";
+        nc.AbortModVks = TriggerVksFromSpec("Ctrl+Alt");
+        LookupKey("F12", out h, out im);
+        nc.AbortKeyVk = HidToVk(h, "F12");
+        nc.AbortKeyName = "F12";
+        nc.DefaultDelayMs = 3000;
+        LookupKey("Space", out h, out im);
+        nc.IdlerKeyHid = h;
+        nc.IdlerKeyName = "Space";
+        nc.IdlerDelayMs = 60000;
+        return nc;
+    }
+
+    // baseCfg seeds the values; keys actually present in root override them.
+    static Config ParseConfigObject(Dictionary<string, object> root, Config baseCfg, bool parseSteps, bool parseDebug, bool parseIdler)
+    {
+        Config nc = new Config();
+        nc.TriggerModVks = new List<byte>(baseCfg.TriggerModVks);
+        nc.TriggerKeyVk = baseCfg.TriggerKeyVk;
+        nc.TriggerKeyName = baseCfg.TriggerKeyName;
+        nc.AbortModVks = new List<byte>(baseCfg.AbortModVks);
+        nc.AbortKeyVk = baseCfg.AbortKeyVk;
+        nc.AbortKeyName = baseCfg.AbortKeyName;
+        nc.DefaultDelayMs = baseCfg.DefaultDelayMs;
+        nc.Debug = baseCfg.Debug;
+        nc.IdlerKeyHid = baseCfg.IdlerKeyHid;
+        nc.IdlerKeyName = baseCfg.IdlerKeyName;
+        nc.IdlerDelayMs = baseCfg.IdlerDelayMs;
+        nc.NotificationsEnabled = baseCfg.NotificationsEnabled;
+
+        object o;
+        if (root.TryGetValue("trigger_mods", out o))
+        {
+            string mods;
+            if (o is string) mods = (string)o;
+            else if (o is IList<object>)
+            {
+                List<string> mm = new List<string>();
+                foreach (object x in (IList<object>)o) mm.Add((string)x);
+                mods = String.Join("+", mm.ToArray());
+            }
+            else return FailLoad("Invalid trigger_mods value.");
             List<byte> vks = TriggerVksFromSpec(mods);
             if (vks == null) return FailLoad("Invalid trigger_mods: " + mods);
             nc.TriggerModVks = vks;
+        }
 
-            string tk = "K";
-            if (root.TryGetValue("trigger_key", out o) && o is string) tk = (string)o;
+        if (root.TryGetValue("trigger_key", out o) && o is string)
+        {
+            string tk = (string)o;
             byte tHid; byte tImp;
             if (!LookupKey(tk, out tHid, out tImp))
             {
@@ -921,24 +1027,27 @@ static NotifyIcon notifyIcon;
             }
             nc.TriggerKeyName = tk.ToUpperInvariant();
             nc.TriggerKeyVk = HidToVk(tHid, tk);
+        }
 
-            string abortMods = "Ctrl+Alt";
-            if (root.TryGetValue("abort_mods", out o))
+        if (root.TryGetValue("abort_mods", out o))
+        {
+            string abortMods;
+            if (o is string) abortMods = (string)o;
+            else if (o is IList<object>)
             {
-                if (o is string) abortMods = (string)o;
-                else if (o is IList<object>)
-                {
-                    List<string> am = new List<string>();
-                    foreach (object x in (IList<object>)o) am.Add((string)x);
-                    abortMods = String.Join("+", am.ToArray());
-                }
+                List<string> am = new List<string>();
+                foreach (object x in (IList<object>)o) am.Add((string)x);
+                abortMods = String.Join("+", am.ToArray());
             }
+            else return FailLoad("Invalid abort_mods value.");
             List<byte> aVks = TriggerVksFromSpec(abortMods);
             if (aVks == null) return FailLoad("Invalid abort_mods: " + abortMods);
             nc.AbortModVks = aVks;
+        }
 
-            string ak = "F12";
-            if (root.TryGetValue("abort_key", out o) && o is string) ak = (string)o;
+        if (root.TryGetValue("abort_key", out o) && o is string)
+        {
+            string ak = (string)o;
             byte aHid; byte aImp;
             if (!LookupKey(ak, out aHid, out aImp))
             {
@@ -946,23 +1055,74 @@ static NotifyIcon notifyIcon;
             }
             nc.AbortKeyName = ak.ToUpperInvariant();
             nc.AbortKeyVk = HidToVk(aHid, ak);
+        }
 
-            if (root.TryGetValue("default_delay_ms", out o))
+        if (root.TryGetValue("default_delay_ms", out o))
+        {
+            try { nc.DefaultDelayMs = Convert.ToInt32(o); }
+            catch { return FailLoad("Invalid default_delay_ms value."); }
+            if (nc.DefaultDelayMs < 50)
             {
-                nc.DefaultDelayMs = Convert.ToInt32(o);
-                if (nc.DefaultDelayMs < 50)
+                return FailLoad("default_delay_ms too small (min 50)");
+            }
+        }
+
+        if (parseDebug && root.TryGetValue("debug", out o))
+        {
+            try { nc.Debug = Convert.ToBoolean(o); }
+            catch { return FailLoad("Invalid debug value."); }
+        }
+
+        // Idler: an optional key auto-pressed every IdlerDelayMs (global settings only).
+        if (parseIdler && root.TryGetValue("idler", out o))
+        {
+            Dictionary<string, object> idl = o as Dictionary<string, object>;
+            if (idl == null) return FailLoad("'idler' must be an object.");
+            object kObj;
+            string keyName = "Space";
+            if (idl.TryGetValue("key", out kObj))
+            {
+                if (!(kObj is string)) return FailLoad("Invalid idler.key value.");
+                keyName = (string)kObj;
+                byte iH; byte iImp;
+                if (!LookupKey(keyName, out iH, out iImp))
                 {
-                    return FailLoad("default_delay_ms too small (min 50)");
+                    return FailLoad("Unknown idler key: " + keyName);
+                }
+                nc.IdlerKeyHid = iH;
+                nc.IdlerKeyName = keyName.ToUpperInvariant();
+            }
+            object dObj0;
+            if (idl.TryGetValue("delay_ms", out dObj0))
+            {
+                try { nc.IdlerDelayMs = Convert.ToInt32(dObj0); }
+                catch { return FailLoad("Invalid idler.delay_ms value."); }
+                if (nc.IdlerDelayMs < 1000)
+                {
+                    return FailLoad("idler.delay_ms too small (min 1000)");
                 }
             }
+        }
 
-            if (root.TryGetValue("debug", out o))
-                nc.Debug = Convert.ToBoolean(o);
+        // Notifications: tray balloon popups (global settings only).
+        if (parseIdler && root.TryGetValue("notifications", out o))
+        {
+            Dictionary<string, object> notif = o as Dictionary<string, object>;
+            if (notif == null) return FailLoad("'notifications' must be an object.");
+            object nObj;
+            if (notif.TryGetValue("enabled", out nObj))
+            {
+                try { nc.NotificationsEnabled = Convert.ToBoolean(nObj); }
+                catch { return FailLoad("Invalid notifications.enabled value."); }
+            }
+        }
 
+        if (parseSteps)
+        {
             object stepsObj;
             if (!root.TryGetValue("steps", out stepsObj))
             {
-                return FailLoad("Config must contain a 'steps' array.");
+                return FailLoad("Profile must contain a 'steps' array.");
             }
             IList<object> arr = stepsObj as IList<object>;
             if (arr == null) return FailLoad("'steps' must be an array.");
@@ -994,9 +1154,64 @@ static NotifyIcon notifyIcon;
                 }
                 nc.Sequence.Add(kt);
             }
-
             if (nc.Sequence.Count == 0) return FailLoad("No steps defined.");
-            return nc;
+        }
+        return nc;
+    }
+
+    // Global settings file. Missing file -> defaults. Invalid file -> error.
+    static bool TryLoadSettings(string path, out Config cfg, out string err)
+    {
+        cfg = null; err = null;
+        Config def = DefaultSettings();
+        if (!File.Exists(path)) { cfg = def; return true; }
+        string text = "";
+        string js = "";
+        try
+        {
+            LastConfigLoadError = null;
+            text = File.ReadAllText(path);
+            LastJsonText = text;
+            js = StripJsonComments(text);
+            JavaScriptSerializer ser = new JavaScriptSerializer();
+            Dictionary<string, object> root = ser.DeserializeObject(js) as Dictionary<string, object>;
+            if (root == null)
+            {
+                LastConfigLoadError = "viperkey-settings.json is not a JSON object.";
+                err = LastConfigLoadError;
+                return false;
+            }
+            cfg = ParseConfigObject(root, def, false, true, true);
+            if (cfg == null) { err = LastConfigLoadError ?? "invalid settings"; return false; }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            string msg = ex.Message;
+            int off = ExtractCharOffset(msg);
+            int line = (off > 0) ? OffsetToOriginalLine(text, js, off) : -1;
+            if (line > 0) msg = "line " + line + ": " + msg;
+            LastConfigLoadError = "Settings parse error: " + msg;
+            err = LastConfigLoadError;
+            return false;
+        }
+    }
+
+    // Load a profile: global settings as the base, profile fields override.
+    static Config LoadProfileConfig(string path, Config settings)
+    {
+        string text = "";
+        string js = "";
+        try
+        {
+            LastConfigLoadError = null;
+            text = File.ReadAllText(path);
+            LastJsonText = text;
+            js = StripJsonComments(text);
+            JavaScriptSerializer ser = new JavaScriptSerializer();
+            Dictionary<string, object> root = ser.DeserializeObject(js) as Dictionary<string, object>;
+            if (root == null) return FailLoad("Profile is not a JSON object.");
+            return ParseConfigObject(root, settings, true, false, false);
         }
         catch (Exception ex)
         {
@@ -1008,10 +1223,90 @@ static NotifyIcon notifyIcon;
         }
     }
 
-    static void WriteDefaultJson(string path)
+    static string ReadActiveProfile()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return null;
+            string js = StripJsonComments(File.ReadAllText(SettingsPath));
+            JavaScriptSerializer ser = new JavaScriptSerializer();
+            Dictionary<string, object> root = ser.DeserializeObject(js) as Dictionary<string, object>;
+            object o;
+            if (root != null && root.TryGetValue("active_profile", out o) && o is string)
+                return (string)o;
+        }
+        catch { }
+        return null;
+    }
+
+    static void SaveActiveProfile(string name)
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+            string raw = File.ReadAllText(SettingsPath);
+            string quoted = "\"active_profile\": \"" + name + "\"";
+            if (Regex.IsMatch(raw, @"""active_profile""\s*:", RegexOptions.IgnoreCase))
+            {
+                raw = Regex.Replace(raw, @"""active_profile""\s*:\s*""[^""]*""", quoted);
+            }
+            else
+            {
+                // Insert before the last closing brace.
+                int lastBrace = raw.LastIndexOf('}');
+                if (lastBrace < 0) return;
+                raw = raw.Substring(0, lastBrace).TrimEnd() + ",\n" + quoted + "\n}\n";
+            }
+            File.WriteAllText(SettingsPath, raw, Encoding.UTF8);
+        }
+        catch { }
+    }
+
+    static void SaveNotificationsEnabled(bool enabled)
+    {
+        try
+        {
+            string raw = File.Exists(SettingsPath) ? File.ReadAllText(SettingsPath) : null;
+            string val = enabled ? "true" : "false";
+            if (raw == null)
+            {
+                raw = "{\n    \"notifications\": {\n        \"enabled\": " + val + "\n    }\n}\n";
+            }
+            else if (Regex.IsMatch(raw, @"""enabled""\s*:", RegexOptions.IgnoreCase))
+            {
+                raw = Regex.Replace(raw,
+                    @"""enabled""\s*:\s*(true|false)",
+                    "\"enabled\": " + val,
+                    RegexOptions.IgnoreCase);
+            }
+            else if (Regex.IsMatch(raw, @"""notifications""\s*:", RegexOptions.IgnoreCase))
+            {
+                // Block exists but has no 'enabled' yet: insert right after its '{'.
+                int idx = raw.IndexOf("notifications", StringComparison.OrdinalIgnoreCase);
+                int brace = raw.IndexOf('{', idx + "notifications".Length);
+                raw = raw.Substring(0, brace + 1) +
+                    "\n        \"enabled\": " + val + "," +
+                    raw.Substring(brace + 1);
+            }
+            else
+            {
+                // No notifications block at all: insert before the last closing brace.
+                int lastBrace = raw.LastIndexOf('}');
+                if (lastBrace < 0) return;
+                raw = raw.Substring(0, lastBrace).TrimEnd() +
+                    ",\n    \"notifications\": {\n        \"enabled\": " + val + "\n    }\n}\n";
+            }
+            File.WriteAllText(SettingsPath, raw, Encoding.UTF8);
+        }
+        catch { }
+    }
+
+    static void WriteSettingsTemplate(string path)
     {
         string txt =
             "{\n" +
+            "    // Global settings shared by every profile. This file is OPTIONAL;\n" +
+            "    // if omitted, the defaults below apply.\n" +
             "    // Trigger: hold Ctrl and press K\n" +
             "    \"trigger_mods\": \"Ctrl\",\n" +
             "    \"trigger_key\": \"K\",\n" +
@@ -1020,8 +1315,35 @@ static NotifyIcon notifyIcon;
             "    \"abort_key\": \"F12\",\n" +
             "    // Default pause between steps in milliseconds (1000 = 1s, 3500 = 3.5s)\n" +
             "    \"default_delay_ms\": 3000,\n" +
-            "    // debug: true writes a viperkey.log file next to the exe\n" +
+            "    // debug: true writes a viperkey.log file next to the exe (global-only)\n" +
             "    \"debug\": false,\n" +
+            "    // Idler: press a key periodically to look alive. Toggle in the tray menu.\n" +
+            "    // delay_ms is the pause between presses in milliseconds (min 1000).\n" +
+            "    \"idler\": {\n" +
+            "        \"key\": \"Space\",\n" +
+            "        \"delay_ms\": 60000\n" +
+            "    },\n" +
+            "    // Notifications: tray popups (profile switch, idler toggle, errors).\n" +
+            "    // Off by default; toggling the tray menu item saves back to this file.\n" +
+            "    \"notifications\": {\n" +
+            "        \"enabled\": false\n" +
+            "    },\n" +
+            "    // active_profile: which profile (viperkey.x.y.json) is active.\n" +
+            "    // Updated automatically when you switch in the tray Profile menu.\n" +
+            "    \"active_profile\": \"viperkey.json\"\n" +
+            "}\n";
+        File.WriteAllText(path, txt, Encoding.UTF8);
+    }
+
+    static void WriteProfileTemplate(string path)
+    {
+        string txt =
+            "{\n" +
+            "    // name: shown in the tray Profile menu (the label part of the\n" +
+            "    // filename is ignored - only the number orders the menu).\n" +
+            "    \"name\": \"My Profile\",\n" +
+            "    // You may override trigger_mods, trigger_key, abort_mods, abort_key and\n" +
+            "    // default_delay_ms from viperkey-settings.json here. 'debug' is not allowed.\n" +
             "    // steps: one object per step. Keys joined with '+' form a chord:\n" +
             "    // pressed in the order written, held briefly, released in reverse.\n" +
             "    // A modifier prefixes ONLY the key that follows it, so ~+1 == Shift+grave+1\n" +
@@ -1037,20 +1359,6 @@ static NotifyIcon notifyIcon;
     }
 
     // ---------- logging ----------
-    static bool PeekDebugFlag(string path)
-    {
-        try
-        {
-            string text = File.ReadAllText(path);
-            JavaScriptSerializer ser = new JavaScriptSerializer();
-            Dictionary<string, object> root = (Dictionary<string, object>)ser.DeserializeObject(StripJsonComments(text));
-            object o;
-            if (root != null && root.TryGetValue("debug", out o))
-                return Convert.ToBoolean(o);
-        }
-        catch { }
-        return false;
-    }
 
     static void SetLogging(bool debug)
     {
@@ -1204,6 +1512,83 @@ static NotifyIcon notifyIcon;
         viiper.SendState(0, new byte[0]);
     }
 
+    // ---------- idler ----------
+    static string IdlerDelayLabel()
+    {
+        int ms = (cfg != null) ? cfg.IdlerDelayMs : 60000;
+        int sec = (ms + 999) / 1000;
+        return sec.ToString() + "s";
+    }
+
+    static void UpdateIdlerMenuText()
+    {
+        if (miIdler == null) return;
+        string key = (cfg != null) ? cfg.IdlerKeyName : "Space";
+        miIdler.Text = String.Format("Idler: {0}  ({1} / {2})",
+            idlerEnabled ? "On" : "Off", key, IdlerDelayLabel());
+    }
+
+    static void UpdateIdlerTimer()
+    {
+        if (idlerTimer == null) return;
+        if (idlerEnabled)
+            idlerTimer.Change(cfg.IdlerDelayMs, cfg.IdlerDelayMs);
+        else
+            idlerTimer.Change(Timeout.Infinite, Timeout.Infinite);
+    }
+
+    static void ToggleIdler()
+    {
+        bool on = (miIdler != null) && miIdler.Checked;
+        if (on != idlerEnabled)
+        {
+            idlerEnabled = on;
+            UpdateIdlerTimer();
+            UpdateIdlerMenuText();
+            if (idlerEnabled)
+                ShowTrayBalloon("Macro Tool",
+                    "Idler ON - pressing " + cfg.IdlerKeyName + " every " + IdlerDelayLabel() + ".",
+                    ToolTipIcon.Info);
+            else
+                ShowTrayBalloon("Macro Tool", "Idler OFF.", ToolTipIcon.Info);
+            Console.WriteLine("[{0:HH:mm:ss}] idler {1}", DateTime.Now, idlerEnabled ? "ON" : "OFF");
+        }
+    }
+
+    static void UpdateNotificationsMenuText()
+    {
+        if (miNotifications == null) return;
+        miNotifications.Text = String.Format("Notifications: {0}",
+            notificationsEnabled ? "On" : "Off");
+    }
+
+    static void ToggleNotifications()
+    {
+        bool on = (miNotifications != null) && miNotifications.Checked;
+        if (on != notificationsEnabled)
+        {
+            notificationsEnabled = on;
+            SaveNotificationsEnabled(on);
+            UpdateNotificationsMenuText();
+            if (notificationsEnabled)
+                ShowTrayBalloon("Macro Tool", "Notifications ON.", ToolTipIcon.Info);
+            Console.WriteLine("[{0:HH:mm:ss}] notifications {1}", DateTime.Now, notificationsEnabled ? "ON" : "OFF");
+        }
+    }
+
+    static void IdlerTick(object state)
+    {
+        try
+        {
+            if (!idlerEnabled) return;
+            if (macroActive || abortRequested || configErrorActive) return;
+            if (viiper == null) return;
+            PressKey(0, new byte[] { cfg.IdlerKeyHid });
+            Console.WriteLine("[{0:HH:mm:ss}] idler pressed {1}", DateTime.Now, cfg.IdlerKeyName);
+        }
+        catch { }
+    }
+
     static bool AnyModDown()
     {
         for (int i = 0; i < cfg.TriggerModVks.Count; i++)
@@ -1232,20 +1617,57 @@ static NotifyIcon notifyIcon;
     [STAThread]
     static int Main()
     {
-        cfgPathField = Path.Combine(RuntimeDir(), "viperkey.json");
-        if (!File.Exists(cfgPathField))
+        SettingsPath = Path.Combine(RuntimeDir(), SETTINGS_FILE);
+        string defaultProfilePath = Path.Combine(RuntimeDir(), "viperkey.json");
+
+        // Global settings: defaults if the file is missing, fatal if it is invalid.
+        Config settings;
+        string settingsErr;
+        if (!TryLoadSettings(SettingsPath, out settings, out settingsErr))
         {
-            WriteDefaultJson(cfgPathField);
-            MessageBox.Show("viperkey.json was not found.\n\n" +
-                "A template has been created at:\n" + cfgPathField + "\n\n" +
-                "Fill in your macro steps, then start the tool again.",
+            MessageBox.Show("Error in " + SettingsPath + ".\n\n" +
+                settingsErr + "\n\nRun again after fixing it.",
+                "Macro Tool", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+        SettingsCfg = settings;
+
+        SetLogging(settings.Debug);
+
+        // Discover profiles (viperkey.json = Default, plus viperkey.x.label.json).
+        profileList = ScanProfiles();
+
+        // No profiles at all = fresh install. Create both templates and ask the
+        // user to edit them before we arm anything.
+        if (profileList.Count == 0)
+        {
+            if (!File.Exists(SettingsPath)) WriteSettingsTemplate(SettingsPath);
+            WriteProfileTemplate(defaultProfilePath);
+            MessageBox.Show("Config files were not found, so templates were created at:\n\n" +
+                "  " + SettingsPath + "\n  " + defaultProfilePath +
+                "\n\nEdit the files (replace the example steps), save, and start the tool again. " +
+                "While it runs, edits hot-reload without restarting.",
                 "Macro Tool", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 1;
         }
 
-        SetLogging(PeekDebugFlag(cfgPathField));
+        // Real profiles exist - quietly create any missing files (e.g. a user may
+        // have renamed viperkey.json into numbered profiles) and keep running.
+        if (!File.Exists(SettingsPath)) WriteSettingsTemplate(SettingsPath);
+        if (!File.Exists(defaultProfilePath)) WriteProfileTemplate(defaultProfilePath);
+        profileList = ScanProfiles();
 
-        cfg = LoadJsonConfig(cfgPathField);
+        // Pick the active profile: last one used (settings json), else the first.
+        string active = ReadActiveProfile();
+        Profile start = null;
+        foreach (Profile p in profileList)
+            if (String.Equals(Path.GetFileName(p.FilePath), active, StringComparison.OrdinalIgnoreCase))
+                { start = p; break; }
+        if (start == null) start = profileList[0];
+        cfgPathField = start.FilePath;
+
+        cfg = LoadProfileConfig(cfgPathField, settings);
+        ActiveProfileName = Path.GetFileName(cfgPathField);
         if (cfg == null)
         {
             MessageBox.Show("Config error in " + cfgPathField + ".\n\n" +
@@ -1256,7 +1678,8 @@ static NotifyIcon notifyIcon;
         SetLogging(cfg.Debug);
 
         Console.WriteLine("Virtual keyboard macro tool [" + REV + "]");
-        Console.WriteLine("Config: {0}", cfgPathField);
+        Console.WriteLine("Settings: {0}", SettingsPath);
+        Console.WriteLine("Profile : {0}", Path.GetFileName(cfgPathField));
         Console.WriteLine("Trigger: {0}+{1}", TriggerModNamesJoined(), cfg.TriggerKeyName);
         Console.WriteLine("Default delay: {0}ms", cfg.DefaultDelayMs);
         for (int i = 0; i < cfg.Sequence.Count; i++)
@@ -1290,7 +1713,7 @@ static NotifyIcon notifyIcon;
 
         Console.WriteLine("Armed. Tray icon active. Press {0}+{1} to fire.", TriggerModNamesJoined(), cfg.TriggerKeyName);
         Console.WriteLine("ABORT: {0} interrupts any running sequence.", AbortComboName());
-        Console.WriteLine("Config hot-reload active - edit viperkey.json and save.");
+        Console.WriteLine("Config hot-reload active - edit the profile json and save.");
 
         RefreshAbortHookState();
         StartKeyboardHook();
@@ -1410,6 +1833,7 @@ notifyIcon.Text = "Macro Tool";
         if (alertTrayIcon == null) alertTrayIcon = normalTrayIcon;
 
         configFlashTimer = new System.Threading.Timer(ConfigFlashTick, null, Timeout.Infinite, Timeout.Infinite);
+        idlerTimer = new System.Threading.Timer(IdlerTick, null, Timeout.Infinite, Timeout.Infinite);
 
         ContextMenuStrip menu = new ContextMenuStrip();
 
@@ -1430,9 +1854,26 @@ notifyIcon.Text = "Macro Tool";
         menu.Items.Add(new ToolStripSeparator());
         RefreshComboMenu();
 
-        ToolStripMenuItem miReload = new ToolStripMenuItem("Reload Config");
-        miReload.Click += (s, e) => { reloadNow = true; };
-        menu.Items.Add(miReload);
+        miIdler = new ToolStripMenuItem("Idler");
+        miIdler.CheckOnClick = true;
+        miIdler.CheckedChanged += (s, e) => ToggleIdler();
+        menu.Items.Add(miIdler);
+        UpdateIdlerMenuText();
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        miNotifications = new ToolStripMenuItem("Notifications");
+        miNotifications.CheckOnClick = true;
+        miNotifications.Checked = notificationsEnabled;
+        miNotifications.CheckedChanged += (s, e) => ToggleNotifications();
+        menu.Items.Add(miNotifications);
+        UpdateNotificationsMenuText();
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        ToolStripMenuItem miSettings = new ToolStripMenuItem("Open Settings (viperkey-settings.json)");
+        miSettings.Click += (s, e) => OpenSettingsJson();
+        menu.Items.Add(miSettings);
 
         ToolStripMenuItem miStartup = new ToolStripMenuItem("Run at Startup");
         miStartup.CheckOnClick = true;
@@ -1446,13 +1887,35 @@ notifyIcon.Text = "Macro Tool";
         miExit.Click += (s, e) => { exitRequested = true; Application.Exit(); };
         menu.Items.Add(miExit);
 
+        ToolStripMenuItem miVersion = new ToolStripMenuItem("ViperKey " + REV);
+        miVersion.Enabled = false;
+        menu.Items.Add(miVersion);
+
         notifyIcon.ContextMenuStrip = menu;
         notifyIcon.MouseClick += (s, e) =>
         {
-            if (e.Button == MouseButtons.Left && pendingConfigError != null)
-                ShowTrayBalloon("Macro Tool - invalid config", pendingConfigError, ToolTipIcon.Error);
+            if (e.Button == MouseButtons.Left)
+            {
+                if (pendingConfigError != null)
+                    ShowTrayBalloon("Macro Tool - invalid config", pendingConfigError, ToolTipIcon.Error);
+                ShowTrayMenu();
+            }
         };
+        RefreshProfileMenu();
         notifyIcon.Visible = true;
+    }
+
+    // Replicates the tray icon's own right-click menu opening (private ShowContextMenu),
+    // so a left click produces the exact same positioned menu without a taskbar window.
+    static void ShowTrayMenu()
+    {
+        try
+        {
+            System.Reflection.MethodInfo mi = typeof(NotifyIcon).GetMethod(
+                "ShowContextMenu", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (mi != null) mi.Invoke(notifyIcon, null);
+        }
+        catch { }
     }
 
     static void ConfigFlashTick(object state)
@@ -1533,25 +1996,52 @@ notifyIcon.Text = "Macro Tool";
     {
         using (FileSystemWatcher watcher = new FileSystemWatcher(Path.GetDirectoryName(cfgPathField)))
         {
-            watcher.Filter = Path.GetFileName(cfgPathField);
-            watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size;
-            watcher.Changed += (s, e) => { Interlocked.Exchange(ref cfgChangeTicks, DateTime.UtcNow.Ticks); };
+            // Watch everything: profile files, settings file, and created/deleted
+            // viperkey.*.json -> handled below by filename.
+            watcher.Filter = "viperkey*.json";
+            watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.CreationTime;
+            watcher.Changed += (s, e) =>
+            {
+                string name = Path.GetFileName(e.FullPath);
+                if (String.Equals(name, SETTINGS_FILE, StringComparison.OrdinalIgnoreCase))
+                    Interlocked.Exchange(ref settingsChangeTicks, DateTime.UtcNow.Ticks);
+                else
+                    Interlocked.Exchange(ref cfgChangeTicks, DateTime.UtcNow.Ticks);
+            };
+            watcher.Created += (s, e) => Interlocked.Exchange(ref menuChangeTicks, DateTime.UtcNow.Ticks);
+            watcher.Deleted += (s, e) => Interlocked.Exchange(ref menuChangeTicks, DateTime.UtcNow.Ticks);
             watcher.EnableRaisingEvents = true;
 
             bool comboHeld = false;
             while (!exitRequested)
             {
-                if (reloadNow)
-                {
-                    reloadNow = false;
-                    TryReloadConfig();
-                }
-
                 long change = Volatile.Read(ref cfgChangeTicks);
                 if (change > cfgReloadedTicks && (DateTime.UtcNow.Ticks - change) >= ReloadDebounceTicks)
                 {
                     cfgReloadedTicks = change;
                     TryReloadConfig();
+                }
+
+                long sch = Volatile.Read(ref settingsChangeTicks);
+                if (sch > settingsReloadedTicks && (DateTime.UtcNow.Ticks - sch) >= ReloadDebounceTicks)
+                {
+                    settingsReloadedTicks = sch;
+                    TryReloadSettings();
+                }
+
+                long mch = Volatile.Read(ref menuChangeTicks);
+                if (mch > menuReloadedTicks && (DateTime.UtcNow.Ticks - mch) >= ReloadDebounceTicks)
+                {
+                    menuReloadedTicks = mch;
+                    profileList = ScanProfiles();
+                    if (!File.Exists(cfgPathField) && profileList.Count > 0)
+                    {
+                        // Active profile was deleted - fall back to the first remaining.
+                        cfgPathField = profileList[0].FilePath;
+                        ActiveProfileName = Path.GetFileName(cfgPathField);
+                        TryReloadConfig();
+                    }
+                    RefreshProfileMenu();
                 }
 
                 viiper.EnsureDevice();
@@ -1600,7 +2090,7 @@ notifyIcon.Text = "Macro Tool";
 
     static void TryReloadConfig()
     {
-        Config fresh = LoadJsonConfig(cfgPathField);
+        Config fresh = LoadProfileConfig(cfgPathField, SettingsCfg);
         if (fresh != null)
         {
             cfg = fresh;
@@ -1609,6 +2099,8 @@ notifyIcon.Text = "Macro Tool";
             RegisterAbortHotkey();
             ClearConfigError();
             RefreshComboMenu();
+            profileList = ScanProfiles();
+            RefreshProfileMenu();
             Console.WriteLine("[{0:HH:mm:ss}] Config reloaded. New trigger: {1}+{2}, {3} steps.",
                 DateTime.Now, TriggerModNamesJoined(), cfg.TriggerKeyName, cfg.Sequence.Count);
         }
@@ -1617,6 +2109,40 @@ notifyIcon.Text = "Macro Tool";
             Console.WriteLine("[{0:HH:mm:ss}] Config reload FAILED - keeping previous config.", DateTime.Now);
             ShowConfigError(LastConfigLoadError ?? "invalid JSON");
         }
+    }
+
+    static void TryReloadSettings()
+    {
+        Config settings;
+        string err;
+        if (!TryLoadSettings(SettingsPath, out settings, out err))
+        {
+            Console.WriteLine("[{0:HH:mm:ss}] Settings reload FAILED - keeping previous settings.", DateTime.Now);
+            ShowConfigError(err ?? "invalid settings");
+            return;
+        }
+        SettingsCfg = settings;
+        Config fresh = LoadProfileConfig(cfgPathField, settings);
+        if (fresh == null)
+        {
+            ShowConfigError(LastConfigLoadError ?? "invalid JSON");
+            return;
+        }
+        cfg = fresh;
+        SetLogging(fresh.Debug);
+        RefreshAbortHookState();
+        RegisterAbortHotkey();
+        ClearConfigError();
+        RefreshComboMenu();
+        profileList = ScanProfiles();
+        RefreshProfileMenu();
+        UpdateIdlerTimer();
+        UpdateIdlerMenuText();
+        notificationsEnabled = cfg.NotificationsEnabled;
+        if (miNotifications != null) miNotifications.Checked = notificationsEnabled;
+        UpdateNotificationsMenuText();
+        Console.WriteLine("[{0:HH:mm:ss}] Settings reloaded. New trigger: {1}+{2}, abort: {3}.",
+            DateTime.Now, TriggerModNamesJoined(), cfg.TriggerKeyName, AbortComboName());
     }
 
     static void RefreshComboMenu()
@@ -1631,9 +2157,64 @@ notifyIcon.Text = "Macro Tool";
         catch { }
     }
 
+    static void RefreshProfileMenu()
+    {
+        try
+        {
+            if (notifyIcon == null || notifyIcon.ContextMenuStrip == null) return;
+            ContextMenuStrip menu = notifyIcon.ContextMenuStrip;
+            if (miProfiles != null) menu.Items.Remove(miProfiles);
+            miProfiles = new ToolStripMenuItem("Profile");
+            miProfiles.Image = SystemIcons.Information.ToBitmap();
+            ToolStripMenuItem[] items = new ToolStripMenuItem[profileList.Count];
+            for (int i = 0; i < profileList.Count; i++)
+            {
+                Profile p = profileList[i];
+                ToolStripMenuItem it = new ToolStripMenuItem(p.Name);
+                it.ToolTipText = Path.GetFileName(p.FilePath);
+                it.Checked = String.Equals(Path.GetFileName(p.FilePath), ActiveProfileName, StringComparison.OrdinalIgnoreCase);
+                it.Click += (s, e) => SwitchProfile(p);
+                items[i] = it;
+            }
+            miProfiles.DropDownItems.AddRange(items);
+            menu.Items.Insert(0, miProfiles);
+        }
+        catch { }
+    }
+
+    static void SwitchProfile(Profile p)
+    {
+        Config fresh = LoadProfileConfig(p.FilePath, SettingsCfg);
+        if (fresh == null)
+        {
+            ShowConfigError(LastConfigLoadError ?? "invalid JSON");
+            return;
+        }
+        cfg = fresh;
+        cfgPathField = p.FilePath;
+        ActiveProfileName = Path.GetFileName(p.FilePath);
+        SetLogging(fresh.Debug);
+        SaveActiveProfile(ActiveProfileName);
+        RefreshAbortHookState();
+        RegisterAbortHotkey();
+        ClearConfigError();
+        RefreshComboMenu();
+        RefreshProfileMenu();
+        ShowTrayBalloon("Macro Tool",
+            "Profile switched to '" + p.Name + "'.\nTrigger: " + TriggerModNamesJoined() + "+" + cfg.TriggerKeyName,
+            ToolTipIcon.Info);
+        Console.WriteLine("[{0:HH:mm:ss}] Switched profile to {1}.", DateTime.Now, p.Name);
+    }
+
     static void OpenConfigJson()
     {
         try { System.Diagnostics.Process.Start(cfgPathField); }
+        catch { }
+    }
+
+    static void OpenSettingsJson()
+    {
+        try { System.Diagnostics.Process.Start(SettingsPath); }
         catch { }
     }
 
@@ -1641,6 +2222,7 @@ notifyIcon.Text = "Macro Tool";
     {
         try
         {
+            if (!notificationsEnabled) return;
             notifyIcon.BalloonTipTitle = title;
             notifyIcon.BalloonTipText = body;
             notifyIcon.BalloonTipIcon = icon;

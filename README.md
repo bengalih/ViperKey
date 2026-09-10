@@ -60,13 +60,21 @@ VIIPER is installed to `%LOCALAPPDATA%\VIIPER\viiper.exe`.
 ## Usage
 
 1. Put `viperkey.exe` (or run it from the build output) in any folder.
-2. **First run only creates a `viperkey.json` template — it does not fire anything until you edit that file.** Open the generated `viperkey.json`, replace the example `steps` with the sequence you actually want, save, then start the tool again (or just save the file while the tray app is running — it hot-reloads).
-3. The tray icon appears; the tool logs `Trigger: Ctrl+K` etc. to the console/`viperkey.log` when `debug` is enabled.
-4. Press-and-release the trigger combo. The sequence fires. Press the abort combo to stop it mid-run.
+2. **Missing config files are created automatically as templates** — the tool does not fire anything until you edit them. On first launch it writes:
+   - `viperkey-settings.json` — global settings (trigger/abort combos, default delay, debug, idler, notifications). Optional; if it exists it is read, and defaults apply for any key you omit.
+   - `viperkey.json` — the default profile containing your step sequence.
+   A fresh install stops with a message asking you to edit the templates first. If you already have profiles, any missing file is silently re-created next to them and the tool keeps running.
+3. Open the profile file, replace the example `steps` with the sequence you actually want, save, then start the tool again (or just save the file while the tray app is running — it hot-reloads).
+4. The tray icon appears; the tool logs `Trigger: Ctrl+K` etc. to `viperkey.log` when `debug` is enabled.
+5. Press-and-release the trigger combo. The sequence fires. Press the abort combo to stop it mid-run.
 
 > **⚠ Important: focus matters.** ViperKey keyboards are *real* USB keyboards — nothing is window-targeted. The sequence always goes to whichever window currently has focus, exactly as if you typed it. Make sure the game/chat/app you want to receive the input is the active window before pressing the trigger. There is no "send to window X" option.
 
-### Config (`viperkey.json`)
+### Config
+
+ViperKey uses two config files:
+
+**`viperkey-settings.json`** (optional — defaults apply for any missing key)
 
 ```jsonc
 {
@@ -76,6 +84,24 @@ VIIPER is installed to `%LOCALAPPDATA%\VIIPER\viiper.exe`.
     "abort_key": "F12",
     "default_delay_ms": 1300,        // pause after each step (unless overridden)
     "debug": false,                  // true -> writes viperkey.log next to the exe
+    "idler": {                       // press a key periodically; toggled from the tray
+        "key": "Space",
+        "delay_ms": 60000            // pause between presses, in ms (min 1000)
+    },
+    "notifications": {               // tray popups for profile switch, idler, errors
+        "enabled": false              // off by default; toggling the tray menu saves back here
+    },
+    "active_profile": "viperkey.json"// last-used profile; updated by the tray menu
+}
+```
+
+**`viperkey.json`** (default profile — required)
+
+```jsonc
+{
+    // You may override any setting from viperkey-settings.json here.
+    // 'debug' is not allowed inside profile files.
+    "name": "Default",                // shown in the tray Profile menu
     "steps": [
         { "keys": "Shift+`+1" },
         { "keys": "`+1", "delay_ms": 2000 }   // optional per-step pause override
@@ -83,10 +109,14 @@ VIIPER is installed to `%LOCALAPPDATA%\VIIPER\viiper.exe`.
 }
 ```
 
+**Additional profiles** follow the naming convention `viperkey.<N>.<anything>.json`, e.g. `viperkey.0.Rotation.json`, `viperkey.1.Farming.json`. The number `<N>` only sorts them in the tray **Profile** menu (0, 1, 2 …); the `<anything>` part is ignored. The name shown in the menu comes from the `name` field inside each JSON file. Every other field in a profile is optional — any key you leave out inherits the value from `viperkey-settings.json`.
+
 - **Steps** — each `keys` string is a *chord*: keys are joined with `+`, pressed in order, held briefly, released in reverse. A modifier prefixes only the key after it, so ``Shift+`+1`` means hold Shift, press the grave key, then `1`.
 - **Per-step** `delay_ms` overrides `default_delay_ms` for the pause *after* that step.
-- **Hot reload** — the file is watched; save it and the new config applies within ~0.3 s without restarting.
-- **Tray menu** — Open Config, Reload, Run at Startup (registry), Exit.
+- **Idler** — an anti-idle key. The tray menu item shows `Idler: Off (Space / 60s)`; click it to toggle. It starts **off** every launch (state is never saved) and presses the configured key once per `idler.delay_ms` while on. It pauses while a macro or an abort is in progress.
+- **Hot reload** — all config files are watched; save any of them and the change applies within ~0.3 s without restarting. Profile names and the profile list refresh live too.
+- **Tray menu** — Profile switcher, Open Config, Open Settings, Run at Startup (registry), then separate **Idler** and **Notifications** sections, Exit, and the version at the bottom. Left or right click on the tray icon opens the menu.
+- **`active_profile`** — last-used profile is saved here automatically so the tool remembers your choice across restarts.
 
 ## Architecture
 
@@ -143,11 +173,11 @@ Then run it:
 .\viperkey.exe
 ```
 
-Since the exe has no console, nothing prints to the terminal; enable `"debug": true` in `viperkey.json` to get the log lines written to `viperkey.log` next to the exe.
+Since the exe has no console, nothing prints to the terminal; enable `"debug": true` in `viperkey-settings.json` to get the log lines written to `viperkey.log` next to the exe.
 
 ### Load and run the source directly (no exe produced)
 
-The in-memory compile produces no executable entry point, and its `AppDomain` base directory is PowerShell's install folder — not your working directory. So the private static `Main` is invoked via reflection, and `VIPERKEY_DIR` redirects `viperkey.json`/`viperkey.log`/icons to the current folder:
+The in-memory compile produces no executable entry point, and its `AppDomain` base directory is PowerShell's install folder — not your working directory. So the private static `Main` is invoked via reflection, and `VIPERKEY_DIR` redirects the config files/viperkey.log/icons to the current folder:
 
 ```powershell
 cd D:\path\to\this\repo
@@ -160,7 +190,7 @@ $t.GetMethod('Main', [Reflection.BindingFlags]'Static,NonPublic,Public').Invoke(
 
 The tool then runs inside the PowerShell session, so:
 - Keep that window open — closing it exits the tool.
-- `viperkey.json` is looked up in the **PowerShell current directory**. On first run a template is created there.
+- `viperkey-settings.json` and the profile files (`viperkey.json`, `viperkey.x.y.json`) are looked up in the **PowerShell current directory**. If any are missing, template copies are created there.
 - It auto-starts `viiper.exe` from `%LOCALAPPDATA%\VIIPER` if not already running.
 
 > Note: `System.Web.Extensions` supplies the built-in `JavaScriptSerializer` used to parse the config. `System.Management` is referenced defensively; the other two are UI (Forms/Drawing).
@@ -174,7 +204,9 @@ The tool then runs inside the PowerShell session, so:
 | `LICENSE` | GNU GPL v3 (ViperKey's own license) |
 | `NOTICE` | Third-party attribution (VIIPER GPL-3.0, usbip-win2 BSD-2-Clause) |
 | `icons/icon.ico`, `icons/alert.ico` | Tray icons; also embedded in the binary |
-| `viperkey.json` | Per-user config — **not committed** (see `.gitignore`) |
+| `viperkey.json` | Default profile — per-user, **not committed** (see `.gitignore`) |
+| `viperkey.<N>.<anything>.json` | Additional profiles, user-local — **not committed** |
+| `viperkey-settings.json` | Global settings + `active_profile` — **not committed** |
 
 ## License
 

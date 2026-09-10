@@ -1,5 +1,7 @@
 # Local config
 viperkey.json
+viperkey-settings.json
+viperkey.*.json
 
 # Logs and compiled output
 *.log
