@@ -18,7 +18,7 @@ You set a *trigger* and a *macro* in a JSON file. When you press the trigger com
 
 Use cases:
 
-- Chained `/commands` in games (e.g. `Shift+`+1`, `E`, then an emote) with reliable timing.
+- Chained `/commands` in games (e.g. ``Shift+`+1``, `E`, then an emote) with reliable timing.
 - Repetitive menu navigation that must look human.
 - Any place where a real keyboard is expected.
 
@@ -68,7 +68,7 @@ VIIPER is installed to `%LOCALAPPDATA%\VIIPER\viiper.exe`.
 }
 ```
 
-- **Steps** — each `keys` string is a *chord*: keys are joined with `+`, pressed in order, held briefly, released in reverse. A modifier prefixes only the key after it, so `Shift+`+1` = hold Shift, press `` ` ``, then `1`.
+- **Steps** — each `keys` string is a *chord*: keys are joined with `+`, pressed in order, held briefly, released in reverse. A modifier prefixes only the key after it, so ``Shift+`+1`` means hold Shift, press the grave key, then `1`.
 - **Per-step** `delay_ms` overrides `default_delay_ms` for the pause *after* that step.
 - **Hot reload** — the file is watched; save it and the new config applies within ~0.3 s without restarting.
 - **Tray menu** — Open Config, Reload, Run at Startup (registry), Exit.
