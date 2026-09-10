@@ -152,5 +152,11 @@ The tool then runs inside the PowerShell session, so:
 | Path | Purpose |
 |---|---|
 | `viperkey.cs` | Entire application (single file) |
+| `LICENSE` | GNU GPL v3 (ViperKey's own license) |
+| `NOTICE` | Third-party attribution (VIIPER GPL-3.0, usbip-win2 BSD-2-Clause) |
 | `icons/icon.ico`, `icons/alert.ico` | Tray icons; also embedded in the binary |
 | `viperkey.json` | Per-user config — **not committed** (see `.gitignore`) |
+
+## License
+
+ViperKey is free software under the **GNU GPL v3-or-later** (see `LICENSE`). TL;DR: you may fork, modify, and redistribute it — forks must give credit (keep the copyright notice) **and** must stay free (any distributed modified version must be GPL too, with its source available). Attribution for the external components ViperKey talks to is kept in `NOTICE`.

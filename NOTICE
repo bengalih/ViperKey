@@ -1,0 +1,41 @@
+ViperKey
+Copyright (C) 2026 bengalih
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+Public License (in the LICENSE file) for more details.
+
+----------------------------------------------------------------------
+Third-party components
+----------------------------------------------------------------------
+
+ViperKey does not bundle, link, or vendor any third-party code. At
+runtime it drives two external components that must be installed
+separately. Their licenses remain theirs; this notice credits them as
+required:
+
+  VIIPER - Virtual Input over IP EmulatoR
+  https://github.com/Alia5/VIIPER
+  Copyright (C) 2025-2026 Peter Repukat
+  Licensed under the GNU General Public License, version 3 or later
+  (https://www.gnu.org/licenses/gpl-3.0.html)
+
+  Usbip-win2 - USB/IP Client for Windows
+  https://github.com/vadimgrn/usbip-win2  (2-clause)
+  Copyright (c) 2021-2026 Vadym Hrynchyshyn <vadimgrn@gmail.com>
+  Licensed under the BSD 2-Clause License
+  (https://opensource.org/licenses/BSD-2-Clause)
+
+  USB/IP - Usbip protocol and Linux USB/IP stack
+  https://usbip.sourceforge.net/  (kernel: GPL-2.0)
+  ViperKey interoperates with the USB/IP protocol only; no kernel code
+  or protocol code is copied or incorporated.
+
+  VIIPER client libraries (MIT) - not used by ViperKey, which implements
+  the raw TCP protocol itself; listed for completeness.
