@@ -127,11 +127,14 @@ Then run it:
 
 ### Load and run the source directly (no exe produced)
 
+The in-memory compile produces no executable entry point, so the private static `Main` is invoked via reflection:
+
 ```powershell
 cd D:\path\to\this\repo
-$asm = Add-Type -Path .\viperkey.cs -PassThru `
-  -ReferencedAssemblies System.Web.Extensions,System.Windows.Forms,System.Drawing,System.Management
-$asm.EntryPoint.Invoke($null, @())
+$t = Add-Type -Path .\viperkey.cs -PassThru `
+  -ReferencedAssemblies System.Web.Extensions,System.Windows.Forms,System.Drawing,System.Management |
+  Where-Object FullName -eq 'ViperKey'
+$t.GetMethod('Main', [Reflection.BindingFlags]'Static,NonPublic,Public').Invoke($null, @())
 ```
 
 The tool then runs inside the PowerShell session, so:
