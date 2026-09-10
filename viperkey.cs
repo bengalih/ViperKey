@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 static class ViperKey
 {
-    const string REV = "rev-20260909-16";   // printed at startup; bump on every code change
+    const string REV = "rev-20260909-17";   // printed at startup; bump on every code change
 
     // Where viperkey.json, viperkey.log and the .ico files are looked up.
     // Defaults to the exe folder; VIPERKEY_DIR overrides it (handy when the

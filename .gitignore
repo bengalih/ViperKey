@@ -1,12 +1,10 @@
-# Local config - contains your key bindings, never commit
+# Local config
 viperkey.json
-fakermacro.json
 
 # Logs and compiled output
 *.log
 viperkey.exe
 *.exe
 
-# Scratch/test helper
-aborttest.cs
-aborttest.exe
+#resource files
+/resources/
