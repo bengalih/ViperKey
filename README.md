@@ -47,9 +47,11 @@ VIIPER is installed to `%LOCALAPPDATA%\VIIPER\viiper.exe`.
 ## Usage
 
 1. Put `viperkey.exe` (or run it from the build output) in any folder.
-2. On first run it creates a `viperkey.json` template next to itself and opens an info box; edit that file, then start it again.
+2. **First run only creates a `viperkey.json` template — it does not fire anything until you edit that file.** Open the generated `viperkey.json`, replace the example `steps` with the sequence you actually want, save, then start the tool again (or just save the file while the tray app is running — it hot-reloads).
 3. The tray icon appears; the tool logs `Trigger: Ctrl+K` etc. to the console/`viperkey.log` when `debug` is enabled.
 4. Press-and-release the trigger combo. The sequence fires. Press the abort combo to stop it mid-run.
+
+> **⚠ Important: focus matters.** ViperKey keyboards are *real* USB keyboards — nothing is window-targeted. The sequence always goes to whichever window currently has focus, exactly as if you typed it. Make sure the game/chat/app you want to receive the input is the active window before pressing the trigger. There is no "send to window X" option.
 
 ### Config (`viperkey.json`)
 
