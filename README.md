@@ -125,13 +125,16 @@ ViperKey is a single-file C# program (`viperkey.cs`) with three moving pieces:
 
 `viperkey.cs` compiles directly — no project files, no NuGet. The tray icons are baked into the binary as base64 fallbacks; `icons/icon.ico` and `icons/alert.ico` are still honored if present next to the exe.
 
-### Compile the exe with PowerShell
+### Compile the exe with csc (PowerShell)
+
+Use the .NET Framework csc directly with `/target:winexe` — this produces a **GUI-subsystem** exe with no console window (the `Add-Type -OutputAssembly` route would link it as a console app and pop a terminal on launch).
 
 ```powershell
 cd D:\path\to\this\repo
-Add-Type -Path .\viperkey.cs `
-  -ReferencedAssemblies System.Web.Extensions,System.Windows.Forms,System.Drawing,System.Management `
-  -OutputAssembly .\viperkey.exe
+& "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /out:viperkey.exe `
+  /reference:System.dll /reference:System.Core.dll /reference:System.Web.Extensions.dll `
+  /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Management.dll `
+  viperkey.cs
 ```
 
 Then run it:
@@ -139,6 +142,8 @@ Then run it:
 ```powershell
 .\viperkey.exe
 ```
+
+Since the exe has no console, nothing prints to the terminal; enable `"debug": true` in `viperkey.json` to get the log lines written to `viperkey.log` next to the exe.
 
 ### Load and run the source directly (no exe produced)
 
